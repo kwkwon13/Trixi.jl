@@ -19,9 +19,9 @@ function varnames(variable_mapping, equations_parabolic::LaplaceDiffusion1D)
 end
 
 function flux(u, gradients, orientation::Integer, equations_parabolic::LaplaceDiffusion1D)
-    dudx = gradients
+    dudx, = gradients
     # orientation == 1
-    return equations_parabolic.diffusivity * dudx
+    return SVector(equations_parabolic.diffusivity * dudx)
 end
 
 # Dirichlet and Neumann boundary conditions for use with parabolic solvers in weak form.
@@ -96,4 +96,14 @@ end
                                                                 operator_type::Gradient,
                                                                 equations_parabolic::AbstractLaplaceDiffusion)
     return flux_inner
+end
+
+# SIP penalty function for 1D
+function penalty(u_outer, u_inner, penalty_coeff,
+                 equations_parabolic::LaplaceDiffusion1D,
+                 parabolic_scheme::ViscousFormulationSymmetricInteriorPenalty)
+    
+    jump = u_inner - u_outer
+
+    return penalty_coeff * equations_parabolic.diffusivity * jump
 end

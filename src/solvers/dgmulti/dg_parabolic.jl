@@ -161,6 +161,24 @@ function calc_gradient_interface_flux!(scalar_flux_face_values,
     return nothing
 end
 
+function calc_gradient_interface_flux!(scalar_flux_face_values,
+                                       mesh::DGMultiMesh, equations,
+                                       dg::DGMulti,
+                                       parabolic_scheme::ViscousFormulationSymmetricInteriorPenalty,
+                                       cache, cache_parabolic)
+    (; u_face_values) = cache_parabolic
+    (; mapM, mapP) = mesh.md
+    @threaded for face_node_index in each_face_node_global(mesh, dg)
+        idM, idP = mapM[face_node_index], mapP[face_node_index]
+        uM = u_face_values[idM]
+        uP = u_face_values[idP]
+        # According to Arnold et al. (2002), the scalar flux û = {uₕ}
+        scalar_flux_face_values[idM] = 0.5f0 * (uP - uM)
+    end
+
+    return nothing
+end
+
 function calc_gradient!(gradients, u::StructArray, t, mesh::DGMultiMesh,
                         equations::AbstractEquationsParabolic,
                         boundary_conditions, dg::DGMulti, parabolic_scheme,
@@ -330,6 +348,36 @@ function calc_viscous_fluxes!(flux_viscous, u, gradients, mesh::DGMultiMesh,
     return nothing
 end
 
+@inline function _compute_inv_h_for_sip(idM, idP, mesh::DGMultiMesh{1},
+                                         dg::DGMulti, cache_parabolic)
+    num_face_nodes_per_elem = dg.basis.Nfq
+    elem_M = div(idM - 1, num_face_nodes_per_elem) + 1
+    elem_P = div(idP - 1, num_face_nodes_per_elem) + 1
+
+    invJ_M = cache_parabolic.invJ[1, elem_M]
+    invJ_P = cache_parabolic.invJ[1, elem_P]
+    invJ_avg = 0.5 * (invJ_M + invJ_P)
+
+    return invJ_avg / 2.0
+end
+
+@inline function _compute_inv_h_for_sip(idM, idP, mesh::DGMultiMesh{2},
+                                         dg::DGMulti, cache_parabolic)
+
+    num_face_nodes_per_elem = dg.basis.Nfq
+
+    elem_M = div(idM - 1, num_face_nodes_per_elem) + 1
+    elem_P = div(idP - 1, num_face_nodes_per_elem) + 1
+
+    invJ_M = cache_parabolic.invJ[1, elem_M]
+    invJ_P = cache_parabolic.invJ[1, elem_P]
+
+    invJ_avg = 0.5 * (invJ_M + invJ_P)
+
+    return sqrt(invJ_avg) / 2.0
+end
+
+
 # no penalization for a BR1 parabolic solver
 function calc_viscous_penalty!(scalar_flux_face_values, u_face_values, t,
                                boundary_conditions,
@@ -352,6 +400,46 @@ function calc_viscous_penalty!(scalar_flux_face_values, u_face_values, t,
         scalar_flux_face_values[idM] = scalar_flux_face_values[idM] +
                                        penalty(uP, uM, equations, parabolic_scheme)
     end
+    return nothing
+end
+
+
+function calc_viscous_penalty!(scalar_flux_face_values, u_face_values, t,
+                               boundary_conditions, mesh::DGMultiMesh,
+                               equations::AbstractEquationsParabolic,
+                               dg::DGMulti,
+                               parabolic_scheme::ViscousFormulationSymmetricInteriorPenalty,
+                               cache, cache_parabolic)
+    (; mapM, mapP) = mesh.md
+
+    penalty_base = parabolic_scheme.penalty_parameter
+
+    @threaded for face_node_index in each_face_node_global(mesh, dg)
+        idM, idP = mapM[face_node_index], mapP[face_node_index]
+
+        # Skip boundary nodes (where idM == idP)
+        # Boundary conditions are handled by calc_boundary_flux!
+        if idM == idP
+            continue
+        end
+
+        uM, uP = u_face_values[idM], u_face_values[idP]
+
+        inv_h = _compute_inv_h_for_sip(idM, idP, mesh, dg, cache_parabolic)
+
+        # Full penalty coefficient: α = η/h_e (in Arnold et al. notation)
+        penalty_coeff = penalty_base * inv_h
+
+        # Compute penalty term using equation-specific function
+        # penalty() should return: coeff * diffusivity * (uP - uM)
+        penalty_value = penalty(uP, uM, penalty_coeff, equations, parabolic_scheme)
+
+        # Add penalty to scalar flux
+        # IMPORTANT SIGN CONVENTION:
+        # SIP flux is: {{f}} - τ[u]  (Arnold et al.: σ̂ = {κ∇u} - α[[u]])
+        scalar_flux_face_values[idM] -= penalty_value
+    end
+
     return nothing
 end
 
@@ -417,6 +505,32 @@ function calc_divergence_interface_flux!(scalar_flux_face_values,
             fM = flux_viscous_face_values[dim][idM]
             fP = flux_viscous_face_values[dim][idP]
             # Here, we use the "weak" formulation to compute the divergence (to ensure stability on curved meshes).
+            flux_face_value = flux_face_value +
+                              0.5f0 * (fP + fM) * nxyzJ[dim][face_node_index]
+        end
+        scalar_flux_face_values[idM] = flux_face_value
+    end
+
+    return nothing
+end
+
+function calc_divergence_interface_flux!(scalar_flux_face_values,
+                                         mesh, equations, dg,
+                                         parabolic_scheme::ViscousFormulationSymmetricInteriorPenalty,
+                                         cache, cache_parabolic)
+    flux_viscous_face_values = cache_parabolic.gradients_face_values
+    (; mapM, mapP, nxyzJ) = mesh.md
+
+    @threaded for face_node_index in each_face_node_global(mesh, dg, cache, cache_parabolic)
+        idM, idP = mapM[face_node_index], mapP[face_node_index]
+
+        # Compute average viscous flux: {κ∇ₕuₕ} ⋅ n
+        # According to Arnold et al. (2002), the SIP flux is: σ̂ = {κ∇ₕuₕ} - α[[uₕ]]
+        flux_face_value = zero(eltype(scalar_flux_face_values))
+        for dim in eachdim(mesh)
+            fM = flux_viscous_face_values[dim][idM]
+            fP = flux_viscous_face_values[dim][idP]
+            # Use weak formulation for divergence
             flux_face_value = flux_face_value +
                               0.5f0 * (fP + fM) * nxyzJ[dim][face_node_index]
         end

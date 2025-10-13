@@ -92,4 +92,31 @@ function flux_parabolic(u_ll, u_rr, ::Divergence, mesh::TreeMesh, equations,
     return u_rr # Use the downwind value for the divergence interface flux
 end
 
+"""
+    ViscousFormulationSymmetricInteriorPenalty(penalty_parameter)
+
+The Symmetric Interior Penalty (SIP) method for parabolic terms.
+The penalty parameter controls the stability of the scheme.
+
+- Arnold et al. (2002)
+  Unified Analysis of Discontinuous Galerkin Methods for Elliptic Problems
+  [DOI: 10.1137/s0036142901384162](https://doi.org/10.1137/s0036142901384162)
+"""
+struct ViscousFormulationSymmetricInteriorPenalty{P}
+    penalty_parameter::P
+end
+
+"""
+    flux_parabolic(u_ll, u_rr, gradient_or_divergence, mesh, equations,
+                   parabolic_scheme::ViscousFormulationSymmetricInteriorPenalty)
+
+This computes the interface flux for the SIP method. The interface flux for both
+the gradient and divergence computations is the average value. The penalty term
+is added separately in the divergence computation.
+"""
+function flux_parabolic(u_ll, u_rr, gradient_or_divergence, mesh, equations,
+                        parabolic_scheme::ViscousFormulationSymmetricInteriorPenalty)
+    return 0.5f0 * (u_ll + u_rr)
+end
+
 default_parabolic_solver() = ViscousFormulationBassiRebay1()

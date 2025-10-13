@@ -35,4 +35,14 @@ function penalty(u_outer, u_inner, inv_h, equations_parabolic::LaplaceDiffusion2
     return dg.penalty_parameter * (u_outer - u_inner) * equations_parabolic.diffusivity
 end
 
+
+function penalty(u_outer, u_inner, penalty_coeff,
+                 equations_parabolic::LaplaceDiffusion2D,
+                 parabolic_scheme::ViscousFormulationSymmetricInteriorPenalty)
+
+    jump = u_inner - u_outer
+
+    return penalty_coeff * equations_parabolic.diffusivity * jump
+end
+
 # General Dirichlet and Neumann boundary condition functions are defined in `src/equations/laplace_diffusion_1d.jl`.

@@ -192,7 +192,7 @@ function calc_interface_flux!(surface_flux_values,
                                                  equations_parabolic,
                                                  dg, interface)
 
-        # compute interface flux for the DG divergence 
+        # compute interface flux for the DG divergence
         flux = flux_parabolic(flux_ll, flux_rr, Divergence(),
                               mesh, equations_parabolic, parabolic_scheme)
 
@@ -200,6 +200,62 @@ function calc_interface_flux!(surface_flux_values,
         for v in eachvariable(equations_parabolic)
             surface_flux_values[v, left_direction, left_id] = flux[v]
             surface_flux_values[v, right_direction, right_id] = flux[v]
+        end
+    end
+
+    return nothing
+end
+
+
+function calc_interface_flux!(surface_flux_values,
+                              mesh::TreeMesh{1}, equations_parabolic,
+                              dg::DG,
+                              parabolic_scheme::ViscousFormulationSymmetricInteriorPenalty,
+                              cache_parabolic)
+    @unpack neighbor_ids, orientations = cache_parabolic.interfaces
+    @unpack u_transformed = cache_parabolic.viscous_container
+
+
+    @threaded for interface in eachinterface(dg, cache_parabolic)
+        # Get neighboring elements
+        left_id = neighbor_ids[1, interface]
+        right_id = neighbor_ids[2, interface]
+
+        # Determine interface direction with respect to elements:
+        # orientation = 1: left -> 2, right -> 1
+        left_direction = 2 * orientations[interface]
+        right_direction = 2 * orientations[interface] - 1
+
+        inv_jacobian_left = cache_parabolic.elements.inverse_jacobian[left_id]
+        inv_jacobian_right = cache_parabolic.elements.inverse_jacobian[right_id]
+        inv_jacobian_avg = 0.5f0 * (inv_jacobian_left + inv_jacobian_right)
+
+        h = 2.0f0 / inv_jacobian_avg
+        penalty_coefficient = parabolic_scheme.penalty_parameter / h
+
+        # Get viscous fluxes at interfaces
+        flux_ll, flux_rr = get_surface_node_vars(cache_parabolic.interfaces.u,
+                                                 equations_parabolic,
+                                                 dg, interface)
+
+        # Get solution values at the interface for penalty term
+        u_ll = get_node_vars(u_transformed, equations_parabolic, dg,
+                            nnodes(dg), left_id)
+        u_rr = get_node_vars(u_transformed, equations_parabolic, dg,
+                            1, right_id)
+
+        # Compute average of viscous fluxes
+        flux_avg = flux_parabolic(flux_ll, flux_rr, Divergence(),
+                                 mesh, equations_parabolic, parabolic_scheme)
+
+        # Add penalty term: flux = {flux_viscous} - τ[u]
+        # where [u] = u_ll - u_rr is the jump
+        for v in eachvariable(equations_parabolic)
+            jump = u_ll[v] - u_rr[v]
+            flux_with_penalty = flux_avg[v] - penalty_coefficient * jump
+
+            surface_flux_values[v, left_direction, left_id] = flux_with_penalty
+            surface_flux_values[v, right_direction, right_id] = flux_with_penalty
         end
     end
 
