@@ -226,4 +226,190 @@ end
     # The important thing is that SIP runs without errors and produces non-trivial output
 end
 
+@testset "SIP Convergence Rate Tests" begin
+    # Test convergence rate with analytical solution
+    # For heat equation: u_t = ν ∇²u with u(x,t) = exp(-π²νt) * sin(πx)
+    # This has analytical solution and should converge at O(h^(k+1))
+
+    @testset "1D Convergence" begin
+        using LinearAlgebra: norm
+
+        # Diffusion coefficient
+        ν = 0.01
+
+        # Analytical solution: u(x,t) = exp(-π²νt) * sin(πx) on domain [-1,1]
+        function analytical_solution_1d(x, t, ν)
+            return exp(-π^2 * ν * t) * sin(π * x[1])
+        end
+
+        initial_condition_conv(x, t, equations) = SVector(analytical_solution_1d(x, 0.0, ν))
+
+        polydeg = 3
+        dg = DGMulti(polydeg = polydeg, element_type = Line(),
+                     approximation_type = Polynomial(),
+                     surface_integral = SurfaceIntegralWeakForm(flux_central),
+                     volume_integral = VolumeIntegralWeakForm())
+
+        equations = LinearScalarAdvectionEquation1D(0.0)  # Pure diffusion
+        equations_parabolic = LaplaceDiffusion1D(ν, equations)
+
+        sip_scheme = ViscousFormulationSIP(10.0 * (polydeg + 1)^2)  # Scale with polydeg
+
+        # Test convergence over several mesh resolutions
+        cells_per_dim_list = [8, 16, 32]
+        errors = Float64[]
+
+        for cells_per_dim in cells_per_dim_list
+            mesh = DGMultiMesh(dg, (cells_per_dim,), periodicity = false)
+
+            # Dirichlet BCs with analytical solution
+            function boundary_condition_analytic(x, t, equations_parabolic)
+                return SVector(analytical_solution_1d(x, t, ν))
+            end
+            bc = BoundaryConditionDirichlet(boundary_condition_analytic)
+            boundary_conditions = (; :entire_boundary => bc)
+            boundary_conditions_parabolic = (; :entire_boundary => bc)
+
+            semi = SemidiscretizationHyperbolicParabolic(mesh,
+                                                         (equations, equations_parabolic),
+                                                         initial_condition_conv, dg;
+                                                         solver_parabolic = sip_scheme,
+                                                         boundary_conditions = (boundary_conditions,
+                                                                                boundary_conditions_parabolic))
+
+            tspan = (0.0, 0.1)
+            ode = semidiscretize(semi, tspan)
+
+            # Solve with tight tolerances
+            sol = solve(ode, Trixi.SimpleSSPRK33(; nlevel = 10); dt = 1e-4,
+                        save_everystep = false)
+
+            # Compute L2 error at final time
+            (; cache, mesh) = semi
+            u_numerical = sol.u[end]
+            (; xq) = mesh.md
+
+            u_exact = [analytical_solution_1d(SVector(x), tspan[2], ν)
+                       for x in xq]
+            u_num_values = getindex.(u_numerical, 1)
+
+            # L2 error (normalized by number of points)
+            error_l2 = norm(u_num_values - u_exact) / sqrt(length(u_exact))
+            push!(errors, error_l2)
+        end
+
+        # Compute convergence rates
+        rates = Float64[]
+        for i in 2:length(errors)
+            h_ratio = cells_per_dim_list[i] / cells_per_dim_list[i - 1]
+            rate = log(errors[i - 1] / errors[i]) / log(h_ratio)
+            push!(rates, rate)
+        end
+
+        # Expected convergence rate: O(h^(polydeg+1))
+        expected_rate = polydeg + 1
+
+        # Test that average convergence rate is close to expected (within 0.5)
+        avg_rate = sum(rates) / length(rates)
+        @test avg_rate >= expected_rate - 0.5
+
+        # Print results for debugging
+        println("\n1D SIP Convergence Test (polydeg=$polydeg, ν=$ν):")
+        println("  Cells: ", cells_per_dim_list)
+        println("  Errors: ", errors)
+        println("  Rates: ", rates)
+        println("  Average rate: $avg_rate (expected: $expected_rate)")
+    end
+
+    @testset "2D Convergence" begin
+        using LinearAlgebra: norm
+
+        # Diffusion coefficient
+        ν = 0.01
+
+        # Analytical solution: u(x,y,t) = exp(-2π²νt) * sin(πx) * sin(πy) on domain [-1,1]²
+        function analytical_solution_2d(x, t, ν)
+            return exp(-2 * π^2 * ν * t) * sin(π * x[1]) * sin(π * x[2])
+        end
+
+        initial_condition_conv(x, t, equations) = SVector(analytical_solution_2d(x, 0.0, ν))
+
+        polydeg = 2
+        dg = DGMulti(polydeg = polydeg, element_type = Quad(),
+                     approximation_type = Polynomial(),
+                     surface_integral = SurfaceIntegralWeakForm(flux_central),
+                     volume_integral = VolumeIntegralWeakForm())
+
+        equations = LinearScalarAdvectionEquation2D(0.0, 0.0)  # Pure diffusion
+        equations_parabolic = LaplaceDiffusion2D(ν, equations)
+
+        sip_scheme = ViscousFormulationSIP(10.0 * (polydeg + 1)^2)  # Scale with polydeg
+
+        # Test convergence over several mesh resolutions
+        cells_per_dim_list = [4, 8, 16]
+        errors = Float64[]
+
+        for cells_per_dim in cells_per_dim_list
+            mesh = DGMultiMesh(dg, (cells_per_dim, cells_per_dim), periodicity = false)
+
+            # Dirichlet BCs with analytical solution
+            function boundary_condition_analytic(x, t, equations_parabolic)
+                return SVector(analytical_solution_2d(x, t, ν))
+            end
+            bc = BoundaryConditionDirichlet(boundary_condition_analytic)
+            boundary_conditions = (; :entire_boundary => bc)
+            boundary_conditions_parabolic = (; :entire_boundary => bc)
+
+            semi = SemidiscretizationHyperbolicParabolic(mesh,
+                                                         (equations, equations_parabolic),
+                                                         initial_condition_conv, dg;
+                                                         solver_parabolic = sip_scheme,
+                                                         boundary_conditions = (boundary_conditions,
+                                                                                boundary_conditions_parabolic))
+
+            tspan = (0.0, 0.05)
+            ode = semidiscretize(semi, tspan)
+
+            # Solve with tight tolerances
+            sol = solve(ode, Trixi.SimpleSSPRK33(; nlevel = 10); dt = 1e-4,
+                        save_everystep = false)
+
+            # Compute L2 error at final time
+            (; cache, mesh) = semi
+            u_numerical = sol.u[end]
+            (; xq, yq) = mesh.md
+
+            u_exact = [analytical_solution_2d(SVector(x, y), tspan[2], ν)
+                       for (x, y) in zip(xq, yq)]
+            u_num_values = getindex.(u_numerical, 1)
+
+            # L2 error (normalized by number of points)
+            error_l2 = norm(u_num_values - u_exact) / sqrt(length(u_exact))
+            push!(errors, error_l2)
+        end
+
+        # Compute convergence rates
+        rates = Float64[]
+        for i in 2:length(errors)
+            h_ratio = cells_per_dim_list[i] / cells_per_dim_list[i - 1]
+            rate = log(errors[i - 1] / errors[i]) / log(h_ratio)
+            push!(rates, rate)
+        end
+
+        # Expected convergence rate: O(h^(polydeg+1))
+        expected_rate = polydeg + 1
+
+        # Test that average convergence rate is close to expected (within 0.5)
+        avg_rate = sum(rates) / length(rates)
+        @test avg_rate >= expected_rate - 0.5
+
+        # Print results for debugging
+        println("\n2D SIP Convergence Test (polydeg=$polydeg, ν=$ν):")
+        println("  Cells per dim: ", cells_per_dim_list)
+        println("  Errors: ", errors)
+        println("  Rates: ", rates)
+        println("  Average rate: $avg_rate (expected: $expected_rate)")
+    end
+end
+
 end # module
