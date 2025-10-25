@@ -341,6 +341,15 @@ function calc_viscous_penalty!(scalar_flux_face_values, u_face_values, t,
     return nothing
 end
 
+# no penalization for SIP (penalty already included in flux calculation)
+function calc_viscous_penalty!(scalar_flux_face_values, u_face_values, t,
+                               boundary_conditions,
+                               mesh, equations::AbstractEquationsParabolic,
+                               dg::DGMulti, parabolic_scheme::ViscousFormulationSIP,
+                               cache, cache_parabolic)
+    return nothing
+end
+
 function calc_viscous_penalty!(scalar_flux_face_values, u_face_values, t,
                                boundary_conditions, mesh,
                                equations::AbstractEquationsParabolic,
@@ -423,6 +432,43 @@ function calc_divergence_interface_flux!(scalar_flux_face_values,
                               0.5f0 * (fP + fM) * nxyzJ[dim][face_node_index]
         end
         scalar_flux_face_values[idM] = flux_face_value
+    end
+
+    return nothing
+end
+
+function calc_divergence_interface_flux!(scalar_flux_face_values,
+                                         mesh, equations, dg,
+                                         parabolic_scheme::ViscousFormulationSIP,
+                                         cache, cache_parabolic)
+    flux_viscous_face_values = cache_parabolic.gradients_face_values # reuse storage
+    (; u_face_values) = cache_parabolic
+    (; mapM, mapP, nxyzJ) = mesh.md
+    alpha = parabolic_scheme.alpha
+
+    @threaded for face_node_index in each_face_node_global(mesh, dg, cache, cache_parabolic)
+        idM, idP = mapM[face_node_index], mapP[face_node_index]
+
+        # Get solution values for penalty term
+        uM = u_face_values[idM]
+        uP = u_face_values[idP]
+
+        # Compute average viscous flux dot normal: {{f_v}} ⋅ n
+        flux_face_value = zero(eltype(scalar_flux_face_values))
+        for dim in eachdim(mesh)
+            fM = flux_viscous_face_values[dim][idM]
+            fP = flux_viscous_face_values[dim][idP]
+            flux_face_value = flux_face_value +
+                              0.5f0 * (fP + fM) * nxyzJ[dim][face_node_index]
+        end
+
+        # Subtract SIP penalty term: - alpha * [[u]]
+        # where [[u]] = u^+ - u^- is the solution jump
+        # Note: Using constant alpha for now. Dynamic scaling (alpha * mu / h) will be added in Task 4.
+        jump_u = uP - uM
+        penalty = alpha * jump_u
+
+        scalar_flux_face_values[idM] = flux_face_value - penalty
     end
 
     return nothing
