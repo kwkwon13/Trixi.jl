@@ -92,4 +92,59 @@ function flux_parabolic(u_ll, u_rr, ::Divergence, mesh::TreeMesh, equations,
     return u_rr # Use the downwind value for the divergence interface flux
 end
 
+"""
+    ViscousFormulationSIP(alpha)
+
+The Symmetric Interior Penalty (SIP) method for parabolic terms based on the unified
+framework in
+
+- Douglas N. Arnold, Franco Brezzi, Bernardo Cockburn, L. Donatella Marini (2002)
+  Unified Analysis of Discontinuous Galerkin Methods for Elliptic Problems
+  [DOI: 10.1137/S0036142901384162](https://doi.org/10.1137/S0036142901384162)
+
+The SIP method uses a penalty parameter `alpha` that is dynamically scaled at each interface
+by the mesh size `h` and diffusion coefficient `μ`:
+```math
+α' = α \\frac{μ}{h}
+```
+
+The interface flux is computed as:
+```math
+\\hat{F}_v \\cdot n = \\{\\{μ q_h\\}\\} \\cdot n - α' [[u_h]]
+```
+
+where `{{.}}` denotes the average, `[[.]]` denotes the jump, and `n` is the outward normal vector.
+
+# Arguments
+- `alpha::Real`: The unscaled penalty parameter (must be positive)
+
+# Examples
+```julia
+# Create SIP formulation with penalty parameter alpha = 5.0
+sip = ViscousFormulationSIP(5.0)
+
+# Use in semidiscretization
+semi_parabolic = SemidiscretizationParabolic(mesh, equations_parabolic,
+                                              initial_condition, solver_parabolic;
+                                              parabolic_scheme=sip)
+```
+
+!!! warning "Penalty parameter selection"
+    The choice of `alpha` affects numerical stability. Values between 1 and 10 are typical.
+    Too small values may lead to instability, while too large values increase dissipation.
+"""
+struct ViscousFormulationSIP{RealT <: Real}
+    alpha::RealT
+
+    function ViscousFormulationSIP{RealT}(alpha::RealT) where {RealT <: Real}
+        if alpha <= zero(alpha)
+            throw(ArgumentError("Penalty parameter alpha must be positive, got alpha = $alpha"))
+        end
+        new{RealT}(alpha)
+    end
+end
+
+# Outer constructor for automatic type inference
+ViscousFormulationSIP(alpha::RealT) where {RealT <: Real} = ViscousFormulationSIP{RealT}(alpha)
+
 default_parabolic_solver() = ViscousFormulationBassiRebay1()

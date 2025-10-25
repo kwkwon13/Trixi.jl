@@ -144,7 +144,8 @@ end
 function calc_gradient_interface_flux!(scalar_flux_face_values,
                                        mesh::DGMultiMesh, equations,
                                        dg::DGMulti,
-                                       parabolic_scheme::ViscousFormulationBassiRebay1,
+                                       parabolic_scheme::Union{ViscousFormulationBassiRebay1,
+                                                                ViscousFormulationSIP},
                                        cache, cache_parabolic)
     (; u_face_values) = cache_parabolic
     (; mapM, mapP) = mesh.md
@@ -155,6 +156,7 @@ function calc_gradient_interface_flux!(scalar_flux_face_values,
         # Here, we use the "strong" formulation to compute the gradient.
         # This guarantees that the parabolic formulation is symmetric and
         # stable on curved meshes with variable geometric terms.
+        # Both BR1 and SIP use the average flux for the gradient step.
         scalar_flux_face_values[idM] = 0.5f0 * (uP - uM)
     end
 
