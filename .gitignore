@@ -32,3 +32,4 @@ run*/
 run*/*
 
 LocalPreferences.toml
+.kiro/
