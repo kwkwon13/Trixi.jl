@@ -45,6 +45,91 @@ using Trixi
     end
 end
 
+@testset "DGMulti 1D SIP Integration" begin
+    # Test SIP method with 1D DGMulti mesh on a simple diffusion problem
+    dg = DGMulti(polydeg = 2, element_type = Line(), approximation_type = Polynomial(),
+                 surface_integral = SurfaceIntegralWeakForm(flux_central),
+                 volume_integral = VolumeIntegralWeakForm())
+    cells_per_dimension = (4,)
+    mesh = DGMultiMesh(dg, cells_per_dimension)
+
+    # Test with polynomial initial condition x^2
+    # Laplacian should give constant value 2
+    initial_condition = (x, t, equations) -> SVector(x[1]^2)
+
+    equations = LinearScalarAdvectionEquation1D(1.0)
+    equations_parabolic = LaplaceDiffusion1D(1.0, equations)
+
+    # Use SIP formulation with penalty parameter alpha = 5.0
+    sip_scheme = ViscousFormulationSIP(5.0)
+
+    semi = SemidiscretizationHyperbolicParabolic(mesh, equations, equations_parabolic,
+                                                 initial_condition, dg;
+                                                 solver_parabolic = sip_scheme)
+
+    @test semi.solver_parabolic === sip_scheme
+    @test nvariables(semi) == nvariables(equations)
+    @test Base.ndims(semi) == Base.ndims(mesh)
+    @test Base.real(semi) == Base.real(dg)
+
+    ode = semidiscretize(semi, (0.0, 0.01))
+    u0 = similar(ode.u0)
+    Trixi.compute_coefficients!(u0, 0.0, semi)
+    @test u0 ≈ ode.u0
+
+    # Test gradient calculation
+    (; cache, cache_parabolic, equations_parabolic) = semi
+    (; gradients) = cache_parabolic
+    for dim in eachindex(gradients)
+        fill!(gradients[dim], zero(eltype(gradients[dim])))
+    end
+
+    u0 = Base.parent(ode.u0)
+    t = 0.0
+    Trixi.calc_gradient!(gradients, u0, t, mesh, equations_parabolic,
+                         boundary_condition_periodic, dg, sip_scheme,
+                         cache, cache_parabolic)
+
+    (; xq) = mesh.md
+    # For polynomial x^2, gradient should be: du/dx = 2x
+    @test getindex.(gradients[1], 1) ≈ 2 * xq
+
+    # Test viscous flux calculation
+    u_flux = similar.(gradients)
+    Trixi.calc_viscous_fluxes!(u_flux, u0, gradients, mesh,
+                               equations_parabolic,
+                               dg, cache, cache_parabolic)
+    @test u_flux[1] ≈ gradients[1]
+
+    # Test calc_divergence! with SIP
+    du_sip = similar(u0)
+    @test_nowarn Trixi.calc_divergence!(du_sip, u0, t, u_flux, mesh,
+                                        equations_parabolic,
+                                        boundary_condition_periodic,
+                                        dg, sip_scheme, cache, cache_parabolic)
+
+    Trixi.invert_jacobian!(du_sip, mesh, equations_parabolic, dg, cache; scaling = 1.0)
+
+    # Test with BR1 for comparison
+    br1_scheme = ViscousFormulationBassiRebay1()
+    du_br1 = similar(u0)
+    @test_nowarn Trixi.calc_divergence!(du_br1, u0, t, u_flux, mesh,
+                                        equations_parabolic,
+                                        boundary_condition_periodic,
+                                        dg, br1_scheme, cache, cache_parabolic)
+    Trixi.invert_jacobian!(du_br1, mesh, equations_parabolic, dg, cache; scaling = 1.0)
+
+    # Both should produce non-zero results
+    @test !all(iszero, du_sip)
+    @test !all(iszero, du_br1)
+
+    # For polynomial x^2 with periodic boundaries:
+    # BR1 should give exact Laplacian: d²/dx²(x^2) = 2
+    # Note: use mesh.md.x for element coordinates
+    (; x) = mesh.md
+    @test getindex.(du_br1, 1) ≈ fill(2.0, size(x))
+end
+
 @testset "DGMulti 2D SIP Integration" begin
     # Test SIP method with 2D DGMulti mesh on a simple diffusion problem
     dg = DGMulti(polydeg = 2, element_type = Quad(), approximation_type = Polynomial(),
