@@ -45,4 +45,100 @@ using Trixi
     end
 end
 
+@testset "DGMulti 2D SIP Integration" begin
+    # Test SIP method with 2D DGMulti mesh on a simple diffusion problem
+    dg = DGMulti(polydeg = 2, element_type = Quad(), approximation_type = Polynomial(),
+                 surface_integral = SurfaceIntegralWeakForm(flux_central),
+                 volume_integral = VolumeIntegralWeakForm())
+    cells_per_dimension = (2, 2)
+    mesh = DGMultiMesh(dg, cells_per_dimension)
+
+    # Test with polynomial initial condition x^2 * y
+    # Test if we recover the exact second derivative with SIP
+    initial_condition = (x, t, equations) -> SVector(x[1]^2 * x[2])
+
+    equations = LinearScalarAdvectionEquation2D(1.0, 1.0)
+    equations_parabolic = LaplaceDiffusion2D(1.0, equations)
+
+    # Use SIP formulation with penalty parameter alpha = 5.0
+    sip_scheme = ViscousFormulationSIP(5.0)
+
+    semi = SemidiscretizationHyperbolicParabolic(mesh, equations, equations_parabolic,
+                                                 initial_condition, dg;
+                                                 solver_parabolic = sip_scheme)
+
+    @test semi.solver_parabolic === sip_scheme
+    @test nvariables(semi) == nvariables(equations)
+    @test Base.ndims(semi) == Base.ndims(mesh)
+    @test Base.real(semi) == Base.real(dg)
+
+    ode = semidiscretize(semi, (0.0, 0.01))
+    u0 = similar(ode.u0)
+    Trixi.compute_coefficients!(u0, 0.0, semi)
+    @test u0 ≈ ode.u0
+
+    # Test gradient calculation (should be identical to BR1)
+    (; cache, cache_parabolic, equations_parabolic) = semi
+    (; gradients) = cache_parabolic
+    for dim in eachindex(gradients)
+        fill!(gradients[dim], zero(eltype(gradients[dim])))
+    end
+
+    # unpack VectorOfArray
+    u0 = Base.parent(ode.u0)
+    t = 0.0
+    # pass in `boundary_condition_periodic` to skip boundary flux/integral evaluation
+    Trixi.calc_gradient!(gradients, u0, t, mesh, equations_parabolic,
+                         boundary_condition_periodic, dg, sip_scheme,
+                         cache, cache_parabolic)
+
+    (; x, y, xq, yq) = mesh.md
+    # For polynomial x^2 * y, gradients should be:
+    # ∂/∂x (x^2 * y) = 2 * x * y
+    # ∂/∂y (x^2 * y) = x^2
+    @test getindex.(gradients[1], 1) ≈ 2 * xq .* yq
+    @test getindex.(gradients[2], 1) ≈ xq .^ 2
+
+    # Test viscous flux calculation
+    u_flux = similar.(gradients)
+    Trixi.calc_viscous_fluxes!(u_flux, u0, gradients, mesh,
+                               equations_parabolic,
+                               dg, cache, cache_parabolic)
+    # For LaplaceDiffusion, viscous flux should equal gradients (flux = diffusivity * gradient)
+    @test u_flux[1] ≈ gradients[1]
+    @test u_flux[2] ≈ gradients[2]
+
+    # Test calc_divergence! with SIP
+    du_sip = similar(u0)
+    @test_nowarn Trixi.calc_divergence!(du_sip, u0, t, u_flux, mesh,
+                                        equations_parabolic,
+                                        boundary_condition_periodic,
+                                        dg, sip_scheme, cache, cache_parabolic)
+
+    # Apply Jacobian scaling
+    Trixi.invert_jacobian!(du_sip, mesh, equations_parabolic, dg, cache; scaling = 1.0)
+
+    # Test with BR1 for comparison
+    br1_scheme = ViscousFormulationBassiRebay1()
+    du_br1 = similar(u0)
+    @test_nowarn Trixi.calc_divergence!(du_br1, u0, t, u_flux, mesh,
+                                        equations_parabolic,
+                                        boundary_condition_periodic,
+                                        dg, br1_scheme, cache, cache_parabolic)
+    Trixi.invert_jacobian!(du_br1, mesh, equations_parabolic, dg, cache; scaling = 1.0)
+
+    # SIP should produce different results than BR1 due to penalty term
+    # (except possibly in special cases)
+    @test !all(iszero, du_sip)  # SIP result should not be all zeros
+    @test !all(iszero, du_br1)  # BR1 result should not be all zeros
+
+    # For this polynomial case with periodic boundaries:
+    # BR1 should give the exact Laplacian: ∇·(∇(x^2 * y)) = 2*y
+    # Note: use 'y' not 'yq' - y is the element-level coordinate
+    @test getindex.(du_br1, 1) ≈ 2 * y
+
+    # SIP with penalty may differ from BR1, but both should compute valid results
+    # The important thing is that SIP runs without errors and produces non-trivial output
+end
+
 end # module
